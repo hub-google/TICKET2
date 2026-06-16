@@ -1,3 +1,5 @@
 requests
 beautifulsoup4
 httpx[http2]
+pandas
+openpyxl
