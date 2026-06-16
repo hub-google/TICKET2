@@ -6,7 +6,7 @@ import time
 import re
 import logging
 import random
-import httpx
+from curl_cffi import requests as cffi_requests
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -38,8 +38,8 @@ thread_local = threading.local()
 
 def get_session():
     if not hasattr(thread_local, "session"):
-        # 啟用 HTTP/2 以進行多路復用
-        thread_local.session = httpx.Client(http2=True)
+        # 啟用 curl_cffi 模擬真實瀏覽器指紋
+        thread_local.session = cffi_requests.Session(impersonate="chrome124")
     return thread_local.session
 
 def init_db():
@@ -118,13 +118,13 @@ def smart_upsert(origin, dest, dep_date, trip_type, scan_date, new_flights, fall
                 insert_flight_record(cursor, f)
     else:
         if not new_flights:
-            # 若原本只有一筆空紀錄 (NULL)，而這次確認為沒有班機 (-1)，則更新成 -1
-            if len(existing_records) == 1 and existing_records[0][1] is None and fallback_price == -1:
-                cursor.execute('UPDATE flights SET price=-1 WHERE id=?', (existing_records[0][0],))
+            # 若原本只有一筆空紀錄 (NULL)，而這次確認為沒有班機 (-1) 或被阻擋 (-999)，則更新
+            if len(existing_records) == 1 and existing_records[0][1] is None and fallback_price in (-1, -999):
+                cursor.execute('UPDATE flights SET price=? WHERE id=?', (fallback_price, existing_records[0][0]))
         else:
             cursor.execute('''
                 DELETE FROM flights 
-                WHERE origin=? AND destination=? AND departure_date=? AND trip_type=? AND scan_date=? AND (price IS NULL OR price = -1)
+                WHERE origin=? AND destination=? AND departure_date=? AND trip_type=? AND scan_date=? AND (price IS NULL OR price = -1 OR price = -999)
             ''', (origin, dest, dep_date, trip_type, scan_date))
             
             cursor.execute('''
@@ -198,20 +198,6 @@ def parse_aria_label(label: str) -> dict:
 
 def fetch_flights_sync(origin, dest, dep_date, trip_type, return_days, ret_date, ci_mode=False):
     url = build_google_flights_url(origin, dest, dep_date, ret_date)
-    user_agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0'
-    ]
-    headers = {
-        'User-Agent': random.choice(user_agents),
-        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Sec-Ch-Ua': '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
-        'Sec-Ch-Ua-Mobile': '?0',
-        'Sec-Ch-Ua-Platform': '"Windows"',
-        'Upgrade-Insecure-Requests': '1',
-    }
     
     scan_date = date.today().strftime("%Y-%m-%d")
     session = get_session()
@@ -220,12 +206,19 @@ def fetch_flights_sync(origin, dest, dep_date, trip_type, return_days, ret_date,
     time.sleep(random.uniform(0.1, 1.0))
     
     try:
-        response = session.get(url, headers=headers, timeout=15)
+        response = session.get(url, timeout=15)
         if response.status_code != 200:
             logging.warning(f"[{dest}] {dep_date} {trip_type} HTTP {response.status_code} - 抓取錯誤，寫入 NULL")
             if ci_mode:
                 return {'origin': origin, 'dest': dest, 'dep_date': dep_date, 'trip_type': trip_type, 'scan_date': scan_date, 'flights': [], 'fallback_price': None}
             smart_upsert(origin, dest, dep_date, trip_type, scan_date, [], fallback_price=None)
+            return False
+            
+        if "Our systems have detected unusual traffic" in response.text or "Captcha" in response.text or "CAPTCHA" in response.text or "unusual traffic" in response.text:
+            logging.error(f"[{dest}] {dep_date} {trip_type} 被 Google 防爬蟲機制阻擋！寫入 -999")
+            if ci_mode:
+                return {'origin': origin, 'dest': dest, 'dep_date': dep_date, 'trip_type': trip_type, 'scan_date': scan_date, 'flights': [], 'fallback_price': -999}
+            smart_upsert(origin, dest, dep_date, trip_type, scan_date, [], fallback_price=-999)
             return False
             
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -309,14 +302,6 @@ def scrape_flights(target_city=None, ci_mode=False):
     
     # 建立 14 個城市 x 未來 330 天 x 2種方式(來回/單程) 的終極完整迴圈
     for i in range(1, 331):
-        # 實作動態頻率增量掃描 (Smart Delta Scanning)
-        if i <= 30:
-            pass # 每天掃描
-        elif 31 <= i <= 180:
-            if i % 2 != 0: continue # 每 2 天掃描一次
-        else:
-            if i % 5 != 0: continue # 每 5 天掃描一次
-            
         dep_date = (today + timedelta(days=i)).strftime("%Y-%m-%d")
         
         # 亞洲線
@@ -333,7 +318,7 @@ def scrape_flights(target_city=None, ci_mode=False):
             tasks.append((ORIGIN, dest, dep_date, "oneway", 0, None, ci_mode))
             tasks.append((ORIGIN, dest, dep_date, "roundtrip", LONGHAUL_RETURN_DAYS, ret_date, ci_mode))
 
-    logging.info(f"開始極速爬取，預計發送 {len(tasks)} 個請求 (動態增量掃描啟用)...")
+    logging.info(f"開始極速爬取，預計發送 {len(tasks)} 個請求...")
     start_time = time.time()
     
     # 啟動 ThreadPoolExecutor
