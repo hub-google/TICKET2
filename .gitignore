@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+venv/
+env/
+# 忽略資料庫檔案與轉出的 Excel
+*.db
+*.xlsx
+# 忽略系統生成的 log 檔
+*.log
