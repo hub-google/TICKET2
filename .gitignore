@@ -8,3 +8,7 @@ env/
 *.xlsx
 # 忽略系統生成的 log 檔
 *.log
+
+# 保護部署金鑰
+deploy_key
+deploy_key.pub

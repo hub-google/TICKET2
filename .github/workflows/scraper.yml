@@ -42,8 +42,15 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout repository
+      - name: Checkout Code repository
         uses: actions/checkout@v4
+
+      - name: Checkout DATA repository
+        uses: actions/checkout@v4
+        with:
+          repository: hub-google/TICKET2-DATA
+          ssh-key: ${{ secrets.DATA_REPO_DEPLOY_KEY }}
+          path: data_repo
         
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -59,13 +66,22 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Restore DB from DATA repo
+        run: |
+          if [ -f data_repo/flights.db ]; then
+            cp data_repo/flights.db .
+          fi
+
       - name: Merge DB and export Excel
         run: python merge_db.py
 
-      - name: Commit and Push changes
+      - name: Commit and Push changes to DATA repo
         run: |
-          git config --global user.name "GitHub Actions Bot"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          cp flights.db data_repo/
+          cp flights_database.xlsx data_repo/ || echo "No excel file"
+          cd data_repo
+          git config user.name "GitHub Actions Bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add flights.db flights_database.xlsx
           git commit -m "Auto-update flights database [skip ci]" || echo "No changes to commit"
           git push
