@@ -157,10 +157,10 @@ def smart_upsert(origin, dest, dep_date, trip_type, scan_date, new_flights, fall
                         WHERE id=:id
                     ''', {**f, 'id': matched_id})
                 else:
-                        insert_flight_record(cursor, f)
+                    insert_flight_record(cursor, f)
                         
-        conn.commit()
-        conn.close()
+    conn.commit()
+    conn.close()
 
 def parse_aria_label(label: str) -> dict:
     details = {

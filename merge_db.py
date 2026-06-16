@@ -49,7 +49,7 @@ def merge_all_results():
     logging.info(f"所有資料庫更新完畢，共寫入/檢查 {total_records} 個航線任務。")
     
     logging.info("開始轉出 Excel 報表...")
-    export_excel.export_to_excel()
+    export_excel.export_db_to_excel()
     logging.info("Excel 轉出完成！")
 
 if __name__ == "__main__":
