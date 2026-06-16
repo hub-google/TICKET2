@@ -1,0 +1,71 @@
+name: Google Flights Scraper
+
+on:
+  schedule:
+    # 每天 UTC 18:00 執行 (台灣時間凌晨 02:00)
+    - cron: '0 18 * * *'
+  workflow_dispatch: # 允許手動觸發
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        city: [HND, ICN, SIN, KUL, URC, KMG, SGN, LHR, CDG, MCO, CAI, OSL, FCO, ATH]
+      fail-fast: false
+      max-parallel: 14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Scraper for ${{ matrix.city }}
+        run: python 爬蟲.py --city ${{ matrix.city }} --ci
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.city }}
+          path: ${{ matrix.city }}_results.json
+          retention-days: 1
+
+  merge:
+    needs: scrape
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Merge DB and export Excel
+        run: python merge_db.py
+
+      - name: Commit and Push changes
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add flights.db flights_database.xlsx
+          git commit -m "Auto-update flights database [skip ci]" || echo "No changes to commit"
+          git push

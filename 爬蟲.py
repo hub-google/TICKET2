@@ -10,6 +10,8 @@ import httpx
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import argparse
+import json
 
 # 設定 Logging
 logging.basicConfig(
@@ -194,7 +196,7 @@ def parse_aria_label(label: str) -> dict:
         
     return details
 
-def fetch_flights_sync(origin, dest, dep_date, trip_type, return_days, ret_date):
+def fetch_flights_sync(origin, dest, dep_date, trip_type, return_days, ret_date, ci_mode=False):
     url = build_google_flights_url(origin, dest, dep_date, ret_date)
     user_agents = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -220,7 +222,9 @@ def fetch_flights_sync(origin, dest, dep_date, trip_type, return_days, ret_date)
     try:
         response = session.get(url, headers=headers, timeout=15)
         if response.status_code != 200:
-            logging.warning(f"[{dest}] HTTP {response.status_code} - 抓取錯誤，寫入 NULL")
+            logging.warning(f"[{dest}] {dep_date} {trip_type} HTTP {response.status_code} - 抓取錯誤，寫入 NULL")
+            if ci_mode:
+                return {'origin': origin, 'dest': dest, 'dep_date': dep_date, 'trip_type': trip_type, 'scan_date': scan_date, 'flights': [], 'fallback_price': None}
             smart_upsert(origin, dest, dep_date, trip_type, scan_date, [], fallback_price=None)
             return False
             
@@ -233,7 +237,9 @@ def fetch_flights_sync(origin, dest, dep_date, trip_type, return_days, ret_date)
                                 ('新台幣' in tag['aria-label'] or 'TWD' in tag['aria-label'] or '$' in tag['aria-label']))
                                 
         if not items:
-            logging.warning(f"[{dest}] 找不到任何航班 (確認為無班機)，寫入 -1")
+            logging.warning(f"[{dest}] {dep_date} {trip_type} 找不到任何航班 (確認為無班機)，寫入 -1")
+            if ci_mode:
+                return {'origin': origin, 'dest': dest, 'dep_date': dep_date, 'trip_type': trip_type, 'scan_date': scan_date, 'flights': [], 'fallback_price': -1}
             smart_upsert(origin, dest, dep_date, trip_type, scan_date, [], fallback_price=-1)
             return False
                                 
@@ -276,22 +282,28 @@ def fetch_flights_sync(origin, dest, dep_date, trip_type, return_days, ret_date)
             }
             new_flights.append(data)
             
+        fallback = -1 if not new_flights else None
+        if ci_mode:
+            return {'origin': origin, 'dest': dest, 'dep_date': dep_date, 'trip_type': trip_type, 'scan_date': scan_date, 'flights': new_flights, 'fallback_price': fallback}
+            
         # 執行同日智能去重與補漏
-        smart_upsert(origin, dest, dep_date, trip_type, scan_date, new_flights, fallback_price=-1 if not new_flights else None)
+        smart_upsert(origin, dest, dep_date, trip_type, scan_date, new_flights, fallback_price=fallback)
             
         if new_flights:
-            logging.info(f"[{dest}] {dep_date} 成功更新/寫入 {len(new_flights)} 筆航班資料")
+            logging.info(f"[{dest}] {dep_date} {trip_type} 成功更新/寫入 {len(new_flights)} 筆航班資料")
             return True
         else:
-            logging.warning(f"[{dest}] 無法解析出任何有效航班價格，寫入 -1")
+            logging.warning(f"[{dest}] {dep_date} {trip_type} 無法解析出有效航班，寫入 -1")
             return False
             
     except Exception as e:
-        logging.error(f"[{dest}] 請求失敗: {e} - 寫入 NULL")
+        logging.error(f"[{dest}] {dep_date} {trip_type} 請求失敗: {e} - 寫入 NULL")
+        if ci_mode:
+            return {'origin': origin, 'dest': dest, 'dep_date': dep_date, 'trip_type': trip_type, 'scan_date': scan_date, 'flights': [], 'fallback_price': None}
         smart_upsert(origin, dest, dep_date, trip_type, scan_date, [], fallback_price=None)
         return False
 
-def scrape_flights():
+def scrape_flights(target_city=None, ci_mode=False):
     tasks = []
     today = date.today()
     
@@ -309,33 +321,50 @@ def scrape_flights():
         
         # 亞洲線
         for dest in ASIA_DESTINATIONS:
+            if target_city and dest != target_city: continue
             ret_date = (today + timedelta(days=i + ASIA_RETURN_DAYS)).strftime("%Y-%m-%d")
-            tasks.append((ORIGIN, dest, dep_date, "oneway", 0, None))
-            tasks.append((ORIGIN, dest, dep_date, "roundtrip", ASIA_RETURN_DAYS, ret_date))
+            tasks.append((ORIGIN, dest, dep_date, "oneway", 0, None, ci_mode))
+            tasks.append((ORIGIN, dest, dep_date, "roundtrip", ASIA_RETURN_DAYS, ret_date, ci_mode))
             
         # 歐美線
         for dest in LONGHAUL_DESTINATIONS:
+            if target_city and dest != target_city: continue
             ret_date = (today + timedelta(days=i + LONGHAUL_RETURN_DAYS)).strftime("%Y-%m-%d")
-            tasks.append((ORIGIN, dest, dep_date, "oneway", 0, None))
-            tasks.append((ORIGIN, dest, dep_date, "roundtrip", LONGHAUL_RETURN_DAYS, ret_date))
+            tasks.append((ORIGIN, dest, dep_date, "oneway", 0, None, ci_mode))
+            tasks.append((ORIGIN, dest, dep_date, "roundtrip", LONGHAUL_RETURN_DAYS, ret_date, ci_mode))
 
-    logging.info(f"開始極速爬取 14 個城市全航線，預計發送 {len(tasks)} 個請求 (動態增量掃描啟用)...")
+    logging.info(f"開始極速爬取，預計發送 {len(tasks)} 個請求 (動態增量掃描啟用)...")
     start_time = time.time()
     
     # 啟動 ThreadPoolExecutor
     MAX_WORKERS = 5
+    results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(fetch_flights_sync, *task): task for task in tasks}
         
         for future in as_completed(futures):
             try:
-                future.result()
+                res = future.result()
+                if ci_mode and res:
+                    results.append(res)
             except Exception as e:
                 logging.error(f"任務發生未預期錯誤: {e}")
                 
     elapsed = time.time() - start_time
     logging.info(f"所有 {len(tasks)} 條航線極速爬取完成！總花費時間: {elapsed:.2f} 秒")
+    
+    if ci_mode and target_city:
+        with open(f"{target_city}_results.json", "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+        logging.info(f"CI模式: 已將結果匯出至 {target_city}_results.json")
 
 if __name__ == "__main__":
-    init_db()
-    scrape_flights()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--city", type=str, help="指定抓取的單一城市代碼 (例如 HND)")
+    parser.add_argument("--ci", action="store_true", help="啟用 CI 模式，將結果匯出為 JSON 而非寫入 DB")
+    args = parser.parse_args()
+
+    if not args.ci:
+        init_db()
+        
+    scrape_flights(target_city=args.city, ci_mode=args.ci)
