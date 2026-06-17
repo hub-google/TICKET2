@@ -106,8 +106,8 @@ async def run_fallback_playwright_async(retry_tasks):
             locale="zh-TW"
         )
         
-        # To avoid memory issues and IP blocking, process in batches of 5
-        batch_size = 5
+        # To avoid memory issues but maximize throughput on CI (4 cores, 16GB), process in batches of 20
+        batch_size = 20
         for i in range(0, len(retry_tasks), batch_size):
             batch = retry_tasks[i:i+batch_size]
             tasks = [test_date_fallback(context, task) for task in batch]
