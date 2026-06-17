@@ -31,9 +31,29 @@ async def test_date_fallback(context, task):
     
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+        await page.wait_for_timeout(2000)
+        
+        # 處理 Google Cookie 同意畫面 (歐美機房常見)
+        try:
+            accept_selectors = [
+                "button:has-text('全部接受')",
+                "button:has-text('Accept all')",
+                "span:has-text('全部接受')",
+                "span:has-text('Accept all')"
+            ]
+            for sel in accept_selectors:
+                btn = page.locator(sel).first
+                if await btn.count() > 0 and await btn.is_visible():
+                    logging.info(f"[Fallback Playwright] [{dest}] 點擊 Cookie 同意按鈕 ({sel})")
+                    await btn.click()
+                    await page.wait_for_timeout(3000)
+                    break
+        except Exception:
+            pass
+
         # Wait for the main flight list container
         await page.wait_for_selector('div[role="main"]', timeout=20000)
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(3000)
         
         html = await page.content()
         soup = BeautifulSoup(html, 'html.parser')
