@@ -6,6 +6,9 @@ on:
     - cron: '0 18 * * *'
   workflow_dispatch: # 允許手動觸發
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
@@ -22,11 +25,26 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
 
-      - name: Install dependencies
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Get Playwright version
+        run: echo "PLAYWRIGHT_VERSION=$(pip show playwright | grep Version | cut -d' ' -f2)" >> $GITHUB_ENV
+
+      - name: Cache Playwright Browser
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ env.PLAYWRIGHT_VERSION }}
+
+      - name: Install Playwright Browsers
         run: |
-          pip install -r requirements.txt
-          playwright install chromium
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" != "true" ]; then
+            playwright install chromium
+          fi
           playwright install-deps
 
       - name: Run Scraper for ${{ matrix.city }}
@@ -59,6 +77,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
 
       - name: Install dependencies
         run: pip install -r requirements.txt

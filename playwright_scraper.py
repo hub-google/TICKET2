@@ -30,9 +30,9 @@ async def test_date_fallback(context, task):
     url = f"https://www.google.com/travel/flights?q={encoded_query}&hl=zh-TW&curr=TWD"
     
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=35000)
         # Wait for the main flight list container
-        await page.wait_for_selector('div[role="main"]', timeout=15000)
+        await page.wait_for_selector('div[role="main"]', timeout=20000)
         await page.wait_for_timeout(2000)
         
         html = await page.content()
@@ -124,4 +124,4 @@ def run_fallback_playwright(retry_tasks):
     """供主程式呼叫的同步進入點"""
     if not retry_tasks:
         return []
-    return asyncio.run(run_fallback_playwright_async(retry_tasks))
+    return asyncio.run(run_fallback_playwright_async(retry_tasks, batch_size=10))
