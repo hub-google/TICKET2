@@ -30,7 +30,7 @@ jobs:
           playwright install-deps
 
       - name: Run Scraper for ${{ matrix.city }}
-        run: python 爬蟲.py --city ${{ matrix.city }} --ci
+        run: python scraper.py --city ${{ matrix.city }} --ci
 
       - name: Upload results
         uses: actions/upload-artifact@v4

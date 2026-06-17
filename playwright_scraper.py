@@ -78,7 +78,7 @@ async def test_date_fallback(context, task):
         if flights:
             logging.info(f"[Fallback Playwright] [{dest}] {dep_date} {trip_type} 成功補漏！抓回 {len(flights)} 筆")
             if not ci_mode:
-                from 爬蟲 import smart_upsert
+                from scraper import smart_upsert
                 smart_upsert(origin, dest, dep_date, trip_type, scan_date, flights, fallback_price=None)
             return {"task": task, "flights": flights}
         else:

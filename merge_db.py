@@ -6,7 +6,7 @@ import logging
 import threading
 
 # 載入原本的資料庫模組與匯出模組
-from 爬蟲 import init_db, smart_upsert
+from scraper import init_db, smart_upsert
 import export_excel
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
