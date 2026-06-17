@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import argparse
 import json
+from playwright_scraper import run_fallback_playwright
 
 # 設定 Logging
 logging.basicConfig(
@@ -162,39 +163,85 @@ def smart_upsert(origin, dest, dep_date, trip_type, scan_date, new_flights, fall
     conn.commit()
     conn.close()
 
-def parse_aria_label(label: str) -> dict:
-    details = {
-        'price': None, 'airline': '未知航空', 'stops': '',
-        'departure_time': '', 'arrival_time': '', 'duration': ''
-    }
-    price_match = re.search(r'([0-9,]+)\s*(?:新台幣|TWD)|(?:NT\$|\$|TWD)\s*([0-9,]+)', label)
-    if price_match:
-        val = price_match.group(1) or price_match.group(2)
-        details['price'] = int(val.replace(',', ''))
-        
-    airline_match = re.search(r'搭乘([^的]+)的', label)
-    if airline_match:
-        details['airline'] = airline_match.group(1).strip()
-        
-    if '直達航班' in label or '直飛' in label:
-        details['stops'] = ""
-    else:
-        stops_match = re.search(r'(轉機\s*\d+\s*次)', label)
-        details['stops'] = stops_match.group(1) if stops_match else "有轉機"
-        
-    dept_time_match = re.search(r'(?:上午|下午|清晨|晚上|凌晨)?\s*(\d{1,2}:\d{2})\s*於', label)
-    if dept_time_match:
-        details['departure_time'] = dept_time_match.group(1)
-        
-    arr_time_match = re.search(r'(?:上午|下午|清晨|晚上|凌晨)?\s*(\d{1,2}:\d{2})\s*抵達', label)
-    if arr_time_match:
-        details['arrival_time'] = arr_time_match.group(1)
-        
-    duration_match = re.search(r'總交通時間：(.*?)(?:\s+選擇|$)', label)
-    if duration_match:
-        details['duration'] = duration_match.group(1).strip()
-        
-    return details
+def parse_flights_from_html(html: str) -> list:
+    callbacks = re.findall(r'AF_initDataCallback\((.*?)\);', html, re.DOTALL)
+    flight_data = None
+    for cb in callbacks:
+        if len(cb) > 20000:
+            match = re.search(r"data:\s*(\[.*\]),\s*sideChannel:", cb, re.DOTALL)
+            if not match: match = re.search(r"data:\s*(\[.*\])", cb, re.DOTALL)
+            if match:
+                try:
+                    flight_data = json.loads(match.group(1).replace("undefined", "null"))
+                    break
+                except: pass
+                
+    flights = []
+    def extract_flights(obj):
+        if not isinstance(obj, list): return
+        try:
+            if len(obj) >= 2 and isinstance(obj[1], list) and len(obj[1]) >= 1 and isinstance(obj[1][0], list):
+                price_val = obj[1][0][1]
+                if isinstance(price_val, (int, float)) and price_val > 0:
+                    if isinstance(obj[0], list) and len(obj[0]) >= 10 and isinstance(obj[0][2], list):
+                        legs = obj[0][2]
+                        if len(legs) > 0 and isinstance(legs[0], list):
+                            flights.append(obj)
+                            return
+        except Exception:
+            pass
+        for item in obj:
+            extract_flights(item)
+            
+    extract_flights(flight_data)
+    
+    parsed_results = []
+    for f in flights:
+        try:
+            price = f[1][0][1]
+            airlines = f[0][1]
+            if isinstance(airlines, list):
+                airline_str = "、".join([str(a) for a in airlines if isinstance(a, str)])
+            else:
+                airline_str = "未知航空"
+                
+            legs = f[0][2]
+            stops_count = len(legs) - 1
+            stops_str = "" if stops_count == 0 else f"轉機 {stops_count} 次"
+            
+            dep_time_arr = f[0][5]
+            arr_time_arr = f[0][8]
+            
+            dep_time = f"{dep_time_arr[0]:02d}:{dep_time_arr[1]:02d}" if isinstance(dep_time_arr, list) and len(dep_time_arr) >= 2 else ""
+            arr_time = f"{arr_time_arr[0]:02d}:{arr_time_arr[1]:02d}" if isinstance(arr_time_arr, list) and len(arr_time_arr) >= 2 else ""
+            
+            duration_mins = f[0][9]
+            duration_str = ""
+            if isinstance(duration_mins, int):
+                hours = duration_mins // 60
+                mins = duration_mins % 60
+                duration_str = f"{hours} 小時 {mins} 分鐘"
+                
+            flight_num = ""
+            if len(legs) > 0 and len(legs[0]) >= 23 and isinstance(legs[0][22], list):
+                carrier = legs[0][22][0]
+                num = legs[0][22][1]
+                if carrier and num:
+                    flight_num = f"{carrier}-{num}"
+                    
+            parsed_results.append({
+                'price': price,
+                'airline': airline_str,
+                'stops': stops_str,
+                'departure_time': dep_time,
+                'arrival_time': arr_time,
+                'duration': duration_str,
+                'flight_number': flight_num
+            })
+        except Exception as e:
+            continue
+            
+    return parsed_results
 
 def fetch_flights_sync(origin, dest, dep_date, trip_type, return_days, ret_date, ci_mode=False):
     url = build_google_flights_url(origin, dest, dep_date, ret_date)
@@ -221,15 +268,9 @@ def fetch_flights_sync(origin, dest, dep_date, trip_type, return_days, ret_date,
             smart_upsert(origin, dest, dep_date, trip_type, scan_date, [], fallback_price=-999)
             return False
             
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        items = soup.find_all('li', class_='pIav2d')
-        if not items:
-            items = soup.find_all(lambda tag: tag.has_attr('aria-label') and 
-                                ('抵達' in tag['aria-label']) and 
-                                ('新台幣' in tag['aria-label'] or 'TWD' in tag['aria-label'] or '$' in tag['aria-label']))
+        parsed_flights = parse_flights_from_html(response.text)
                                 
-        if not items:
+        if not parsed_flights:
             logging.warning(f"[{dest}] {dep_date} {trip_type} 找不到任何航班 (確認為無班機)，寫入 -1")
             if ci_mode:
                 return {'origin': origin, 'dest': dest, 'dep_date': dep_date, 'trip_type': trip_type, 'scan_date': scan_date, 'flights': [], 'fallback_price': -1}
@@ -237,28 +278,7 @@ def fetch_flights_sync(origin, dest, dep_date, trip_type, return_days, ret_date,
             return False
                                 
         new_flights = []
-        for item in items:
-            if item.has_attr('aria-label'):
-                aria_label = item['aria-label']
-            else:
-                aria_tag = item.find(attrs={'aria-label': True})
-                if not aria_tag: continue
-                aria_label = aria_tag['aria-label']
-                
-            if "新台幣" not in aria_label and "TWD" not in aria_label:
-                continue
-                
-            details = parse_aria_label(aria_label)
-            if not details.get('price'): continue
-            
-            # 加上從 html 元素的屬性暴力取出 itinerary 航班號碼
-            itinerary_match = re.search(r'itinerary=([A-Z0-9]{2,3}-[A-Z0-9]{2,3}-[A-Z0-9]{2}-\d{1,4}-\d{8})', str(item))
-            flight_num = ''
-            if itinerary_match:
-                parts = itinerary_match.group(1).split('-')
-                if len(parts) >= 4:
-                    flight_num = f"{parts[2]}-{parts[3]}"
-                    
+        for details in parsed_flights:
             data = {
                 'origin': origin,
                 'destination': dest,
@@ -266,7 +286,7 @@ def fetch_flights_sync(origin, dest, dep_date, trip_type, return_days, ret_date,
                 'trip_type': trip_type,
                 'price': details['price'],
                 'airline': details['airline'],
-                'flight_number': flight_num,
+                'flight_number': details['flight_number'],
                 'departure_time': details['departure_time'],
                 'arrival_time': details['arrival_time'],
                 'duration': details['duration'],
@@ -324,19 +344,50 @@ def scrape_flights(target_city=None, ci_mode=False):
     # 啟動 ThreadPoolExecutor
     MAX_WORKERS = 5
     results = []
+    retry_tasks = []
+    
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(fetch_flights_sync, *task): task for task in tasks}
         
         for future in as_completed(futures):
+            task = futures[future]
             try:
                 res = future.result()
-                if ci_mode and res:
-                    results.append(res)
+                if ci_mode:
+                    if res and res.get('fallback_price') == -1:
+                        retry_tasks.append(task)
+                    elif res:
+                        results.append(res)
+                else:
+                    if res is False:
+                        retry_tasks.append(task)
             except Exception as e:
                 logging.error(f"任務發生未預期錯誤: {e}")
                 
     elapsed = time.time() - start_time
     logging.info(f"所有 {len(tasks)} 條航線極速爬取完成！總花費時間: {elapsed:.2f} 秒")
+    
+    # 執行第二階段補漏
+    if retry_tasks:
+        logging.info(f"準備進入第二階段，針對 {len(retry_tasks)} 個失敗任務進行 Playwright 補漏...")
+        fallback_results = run_fallback_playwright(retry_tasks)
+        if ci_mode and fallback_results:
+            scan_date = date.today().strftime("%Y-%m-%d")
+            for fr in fallback_results:
+                task = fr['task']
+                origin, dest, dep_date, trip_type, return_days, ret_date, _ci_mode = task
+                if fr['flights']:
+                    results.append({
+                        'origin': origin, 'dest': dest, 'dep_date': dep_date, 
+                        'trip_type': trip_type, 'scan_date': scan_date, 
+                        'flights': fr['flights'], 'fallback_price': None
+                    })
+                else:
+                    results.append({
+                        'origin': origin, 'dest': dest, 'dep_date': dep_date, 
+                        'trip_type': trip_type, 'scan_date': scan_date, 
+                        'flights': [], 'fallback_price': -1
+                    })
     
     if ci_mode and target_city:
         with open(f"{target_city}_results.json", "w", encoding="utf-8") as f:
