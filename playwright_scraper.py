@@ -91,7 +91,7 @@ async def test_date_fallback(context, task):
     finally:
         await page.close()
 
-async def run_fallback_playwright_async(retry_tasks):
+async def run_fallback_playwright_async(retry_tasks, batch_size=10):
     logging.info(f"開始執行 Playwright 補漏，共有 {len(retry_tasks)} 個任務...")
     start_time = time.time()
     
@@ -106,8 +106,7 @@ async def run_fallback_playwright_async(retry_tasks):
             locale="zh-TW"
         )
         
-        # To avoid memory issues but maximize throughput on CI (4 cores, 16GB), process in batches of 20
-        batch_size = 20
+        # To avoid memory issues but maximize throughput on CI (4 cores, 16GB), process in batches
         for i in range(0, len(retry_tasks), batch_size):
             batch = retry_tasks[i:i+batch_size]
             tasks = [test_date_fallback(context, task) for task in batch]
