@@ -24,7 +24,9 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
 
       - name: Run Scraper for ${{ matrix.city }}
         run: python 爬蟲.py --city ${{ matrix.city }} --ci
